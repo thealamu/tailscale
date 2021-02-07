@@ -11,7 +11,6 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -1428,8 +1427,6 @@ func newNonLegacyTestConn(t testing.TB) *Conn {
 	return conn
 }
 
-var testIssue1282 = flag.Bool("test-issue-1282", false, "run test for https://github.com/tailscale/tailscale/issues/1282 on all CPUs")
-
 // Tests concurrent DERP readers pushing DERP data into ReceiveIPv4
 // (which should blend all DERP reads into UDP reads).
 func TestDerpReceiveFromIPv4(t *testing.T) {
@@ -1443,17 +1440,19 @@ func TestDerpReceiveFromIPv4(t *testing.T) {
 	defer sendConn.Close()
 	nodeKey, _ := addTestEndpoint(conn, sendConn)
 
-	var sends int = 500
-	senders := runtime.NumCPU()
-	if !*testIssue1282 {
-		t.Logf("--test-issue-1282 was not specified; so doing single-threaded test (instead of NumCPU=%d) to work around https://github.com/tailscale/tailscale/issues/1282", senders)
-		senders = 1
+	var sends int = 250e3 // takes about a second
+	if testing.Short() {
+		sends /= 10
 	}
+	senders := runtime.NumCPU()
 	sends -= (sends % senders)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	t.Logf("doing %v sends over %d senders", sends, senders)
-	ctx := context.Background()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer conn.Close()
+	defer cancel()
 
 	for i := 0; i < senders; i++ {
 		wg.Add(1)
@@ -1474,7 +1473,11 @@ func TestDerpReceiveFromIPv4(t *testing.T) {
 					t.Error("unexpected false")
 					return
 				}
-				<-ch
+				select {
+				case <-ch:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
